@@ -1,0 +1,21 @@
+{
+  "run_tag": "pooled",
+  "selected_cell": {
+    "tag": "flow_log_white",
+    "representation": "log",
+    "prior": "white",
+    "metric_value": 0.6431530729947451
+  },
+  "selection_note": "nothing filtered",
+  "cv_seconds": 334462.6980538368,
+  "cv_human": "92h 54m 22.7s",
+  "final_train_seconds": 4304.04513669014,
+  "final_train_human": "1h 11m 44.0s",
+  "total_seconds": 4304.15750336647,
+  "total_human": "1h 11m 44.2s",
+  "timestamp": "2026-08-13 20:58:56",
+  "results_file": "results/day_ahead/experiments_merged_20260813_194712.json",
+  "models": {
+    "flow_log_white": "models/day_ahead/pooled_flow_log_white_final.pt"
+  }
+}

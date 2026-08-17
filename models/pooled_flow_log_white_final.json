@@ -1,0 +1,25 @@
+{
+  "tag": "flow_log_white",
+  "checkpoint": "models/day_ahead/pooled_flow_log_white_final.pt",
+  "representation": "log",
+  "prior": "white",
+  "n_train_windows": 11202,
+  "n_val_windows": 1244,
+  "nwp_channels": [
+    "fut_dswrf_inst_wm2",
+    "fut_dswrf_inst_wm2_present",
+    "fut_tcdc_pct",
+    "fut_tcdc_pct_present",
+    "fut_nwp_csi",
+    "fut_nwp_csi_present"
+  ],
+  "site_vec": [
+    0.036355335265398026,
+    -0.08090336620807648,
+    0.3207142651081085
+  ],
+  "prior_fit": {
+    "kind": "white"
+  },
+  "trained_at": "2026-08-13 20:58:56"
+}
