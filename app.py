@@ -464,11 +464,11 @@ st.markdown("""
 
 .sidebar-logo {
     font-family: var(--syne);
-    font-size: 0.80rem;
-    font-weight: 600;
-    letter-spacing: 0.004em;
+    font-size: 0.70rem;
+    font-weight: 550;
+    letter-spacing: 0.003em;
     color: var(--tx) !important;
-    margin: -6rem -1rem 0.9rem -1rem;
+    margin: -5rem -1rem 0.9rem -1rem;
     padding: 0.55rem 0 0.55rem 1rem;
     border-bottom: 1px solid var(--brd);
 }
