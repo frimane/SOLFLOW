@@ -21,7 +21,7 @@ The repository also includes **DeepQuantile** as a direct comparator, along with
 
 ## Installation
 
-Requires Python [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+Requires [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 
 ```bash
 git clone https://github.com/frimane/SOLFLOW.git
