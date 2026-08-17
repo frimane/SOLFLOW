@@ -502,7 +502,6 @@ st.markdown("""
         width: 100% !important;
         max-width: 100vw !important;
         min-width: 0 !important;
-        overflow-x: hidden !important;
         box-sizing: border-box !important;
       }
       [data-testid="stMainBlockContainer"], .block-container {
