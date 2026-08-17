@@ -92,6 +92,11 @@ st.markdown("""
     color-scheme: dark;
 }
 
+:root {
+    --amber-btn: #c9a04a;      /* muted, less saturated than --amber */
+    --amber-btn-hover: #ad8a3f;
+}
+
 html, body,
 [data-testid="stAppViewContainer"],
 [data-testid="stMain"],
@@ -198,8 +203,8 @@ div[role="radiogroup"] label, [data-baseweb="select"] {
 }
 
 .stButton > button {
-    background: var(--amber) !important;
-    color: #07111e !important;
+    background: var(--amber-btn) !important;
+    color: #0b1420 !important;
     border: none !important;
     font-family: var(--mono) !important;
     font-weight: 600 !important;
@@ -211,7 +216,7 @@ div[role="radiogroup"] label, [data-baseweb="select"] {
     transition: background 0.15s !important;
     width: 100%;
 }
-.stButton > button:hover { background: var(--amber2) !important; }
+.stButton > button:hover { background: var(--amber-btn-hover) !important; }
 
 .stDownloadButton > button {
     background: transparent !important;
@@ -455,6 +460,20 @@ st.markdown("""
     display: flex;
     flex-direction: column;
     min-height: 100vh;
+}
+
+.sidebar-logo {
+    font-family: var(--syne);
+    font-size: 0.80rem;
+    font-weight: 600;
+    letter-spacing: 0.004em;
+    color: var(--tx) !important;
+    margin: -6rem -1rem 0.9rem -1rem;
+    padding: 0.55rem 0 0.55rem 1rem;
+    border-bottom: 1px solid var(--brd);
+}
+.sidebar-logo span {
+    color: var(--amber) !important;
 }
 
 [data-testid="stSidebarUserContent"] > div:last-child {
@@ -1028,6 +1047,11 @@ def current_mode():
 # ==============================================================================
 # SIDEBAR -- every shared setting lives here, once, and applies everywhere.
 # ==============================================================================
+st.sidebar.markdown(
+    f"<div class='sidebar-logo'><span>SOL</span>FLOW {APP_VERSION}</div>",
+    unsafe_allow_html=True,
+)
+
 st.sidebar.markdown("<div class='side-rule'>Data source</div>",
                      unsafe_allow_html=True)
 windows_choice = st.sidebar.radio(
@@ -1137,12 +1161,12 @@ _YEAR = 2026
 st.sidebar.markdown(
     f"""
     <div class="sidebar-footer">
-        <div>
+        <!-- <div>
             <span class="sidebar-footer-muted">&copy; {_YEAR}</span>
             <span class="sidebar-footer-separator">&middot;</span>
             <span class="sidebar-footer-solflow">SOLFLOW</span>
             <span class="sidebar-footer-muted">{APP_VERSION}</span>
-        </div>
+        </div> -->
         <div class="sidebar-footer-links">
             <a href="https://github.com/frimane/SOLFLOW" target="_blank">
                 <img src="https://img.shields.io/badge/GitHub-Code-181717?logo=github">
