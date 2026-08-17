@@ -1,10 +1,15 @@
 # Conditional Flow Matching for Day-Ahead Solar Irradiance Forecasting
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Streamlit](https://img.shields.io/badge/built%20with-Streamlit-ff4b4b.svg)](https://streamlit.io/)
-
 The core model is a conditional **FlowMatcher**, trained with Conditional Flow Matching (CFM), that generates physically interpretable ensembles of future clear-sky-index trajectories. The repository includes a Streamlit app for checkpoint evaluation, model comparison, CSV ingestion, and fine-tuning on new datasets.
+
+<div align="center">
+
+👉 [![Open in Streamlit — solflow.streamlit.app](https://img.shields.io/badge/Open%20in%20Streamlit-solflow.streamlit.app-FF4B4B?logo=streamlit&logoColor=white&style=flat-square)](https://solflow.streamlit.app/)
+
+**🌍 No installation needed — generate forecasting data directly in your browser.**
+
+💤 If asleep, click **"Yes, get this app back up!"** to wake it 
+</div>
 
 ---
 
@@ -16,13 +21,12 @@ The repository also includes **DeepQuantile** as a direct comparator, along with
 
 ## Installation
 
-Requires Python 3.10+.
+Requires Python [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install numpy pandas matplotlib pyyaml streamlit torch
+git clone https://github.com/frimane/SOLFLOW.git
+cd SOLFLOW
+pip install -r requirements.txt
 ```
 
 ## Running the app
@@ -37,7 +41,7 @@ The app accepts CSV files.
 
 **Requirements:**
 - At least **four full days** of data at an exact **10-minute cadence**
-- Columns: timestamp, GHI, clear-sky GHI, solar zenith angle, NWP irradiance/cloud data, and site coordinates
+- Columns: timestamp, GHI, clear-sky GHI, solar zenith angle, NWP irradiance/cloud data, and site coordinates (see the app ``About'' section)
 
 The app validates your file before running and gives a clear error message if something's missing or incompatible.
 
@@ -47,7 +51,7 @@ The app validates your file before running and gives a clear error message if so
 
 ```bash
 python finetune_flowmatcher.py \
-  --checkpoint models/flowmatcher_final.pt \
+  --checkpoint models/needed_checkpoint.pt \
   --windows data/new_dataset_windows.npz \
   --output models/flowmatcher_finetuned.pt \
   --epochs 10 \
@@ -63,9 +67,13 @@ The associated manuscript is in preparation.
 
 ## License
 
-This project is licensed under the **GNU General Public License v3.0**. See [LICENSE](LICENSE) for details.
+This project is licensed under the GNU General Public License v3.0 — see the [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE) file for details.
 
 ## Disclaimer
 
 This software is provided for research and evaluation purposes. Forecasts are model outputs and should not be treated as guaranteed for operational, financial, or grid-control decisions. Validate performance on your own data before any production use.
+
+## Contact
+
+**Azeddine Frimane** — [Azeddine.frimane@yahoo.com](mailto:Azeddine.frimane@yahoo.com)
 
