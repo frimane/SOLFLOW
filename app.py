@@ -1204,85 +1204,128 @@ tab_about, tab_list, tab_forecast, tab_avail, tab_cmp, tab_install = st.tabs(
 # helper for the comparator tab
 def render_comparison_metrics(series, truth, mask, fm, ghi_cs=None):
     if truth is None:
-        st.info("Metrics are unavailable because the selected window has no measured future truth.")
+        st.info("Metrics are unavailable because future observations are missing.")
         return
 
-    truth = np.asarray(truth, dtype=float).reshape(1, -1)
+    truth = np.asarray(truth, dtype=np.float64).reshape(1, -1)
     mask = np.asarray(mask, dtype=bool).reshape(1, -1)
-    ghi_cs_batch = None
+
+    ghi_batch = None
     if ghi_cs is not None:
-        ghi_cs_batch = np.asarray(ghi_cs, dtype=float).reshape(1, -1)
+        ghi_batch = np.asarray(ghi_cs, dtype=np.float64).reshape(1, -1)
 
     rows = []
 
-    metric_names = [
-        ("crps", "CSI CRPS", 4),
-        ("rmse", "CSI RMSE", 4),
-        ("mae", "CSI MAE", 4),
-        ("crps_ghi_weighted", "GHI-weighted CRPS", 4),
-        ("rmse_ghi", "GHI RMSE (W/m²)", 2),
-        ("coverage_80", "80% coverage", 3),
-        ("calibration_err", "Calibration error", 4),
-        ("energy_score", "Energy score", 4),
-        ("variogram_score", "Variogram score", 4),
-        ("daytotal_crps", "Day-total CSI CRPS", 4),
-        ("daytotal_energy_crps", "Day-total energy CRPS", 2),
-        ("daytotal_coverage_80", "Day-total 80% coverage", 3),
-        ("ramp_crps", "Ramp CRPS", 4),
-    ]
-
     for model_name, ensemble in series.items():
-        pred = np.asarray(ensemble, dtype=float)
+        pred = np.asarray(ensemble, dtype=np.float64)
 
-        # Compare Models stores each selected row as [members, horizon].
-        # core.evaluate expects [windows, members, horizon].
+        # series[model_name] has shape [ensemble, horizon].
+        # core.evaluate() expects [windows, ensemble, horizon].
         if pred.ndim == 2:
             pred = pred[None, :, :]
         elif pred.ndim != 3:
-            st.warning(f"Metrics skipped for {model_name}: unexpected forecast shape {pred.shape}.")
+            st.warning(
+                f"Skipping metrics for {model_name}: "
+                f"unexpected forecast shape {pred.shape}."
+            )
             continue
 
         try:
-            metrics = core.evaluate(
-                pred,
-                truth,
-                mask,
-                fm.cfg,
+            scores = core.evaluate(
+                pred_ens=pred,
+                truth=truth,
+                mask=mask,
+                cfg=fm.cfg,
                 K=int(fm.K),
                 n_days=int(fm.n_days),
-                ghi_cs=ghi_cs_batch,
+                ghi_cs=ghi_batch,
             )
         except Exception as exc:
-            st.warning(f"Metrics could not be computed for {model_name}: {exc}")
+            st.warning(f"Metrics failed for {model_name}: {exc}")
             continue
 
-        row = {"Model": model_name}
-        for key, label, decimals in metric_names:
-            value = metrics.get(key, np.nan)
-            if value is None or not np.isfinite(value):
-                row[label] = "—"
-            else:
-                row[label] = f"{float(value):.{decimals}f}"
-        rows.append(row)
+        rows.append(
+            {
+                "Model": model_name,
+
+                # Primary reported metrics: physical GHI space.
+                "GHI CRPS (W/m²)": scores.get("crps_ghi", np.nan),
+                "GHI nCRPS": scores.get("ncrps_ghi", np.nan),
+                "GHI RMSE (W/m²)": scores.get("rmse_ghi", np.nan),
+                "GHI nRMSE": scores.get("nrmse_ghi", np.nan),
+                "GHI MAE (W/m²)": scores.get("mae_ghi", np.nan),
+                "GHI 80% coverage": scores.get("coverage_80_ghi", np.nan),
+
+                # Joint and operational metrics in GHI space.
+                "GHI energy score": scores.get("energy_score_ghi", np.nan),
+                "GHI variogram score": scores.get("variogram_score_ghi", np.nan),
+                "GHI ramp CRPS": scores.get("ramp_crps_ghi", np.nan),
+                "GHI day-total CRPS": scores.get("daytotal_ghi_crps", np.nan),
+                "GHI n ramp CRPS": scores.get("nramp_crps_ghi", np.nan),
+                "GHI n day-total CRPS": scores.get("ndaytotal_ghi_crps", np.nan),
+
+                # CSI metrics retained as secondary diagnostics.
+                "CSI CRPS": scores.get("crps", np.nan),
+                "CSI nCRPS": scores.get("ncrps_csi", np.nan),
+                "CSI RMSE": scores.get("rmse", np.nan),
+                "CSI nRMSE": scores.get("nrmse_csi", np.nan),
+                "CSI ramp CRPS": scores.get("ramp_crps", np.nan),
+                "CSI day-total CRPS": scores.get("daytotal_crps", np.nan),
+            }
+        )
 
     if not rows:
+        st.warning("No model metrics could be calculated for this window.")
         return
 
+    metrics_df = pd.DataFrame(rows).set_index("Model")
+
     st.markdown(
-        "<div class='result-title'>Forecast metrics</div>",
+        "<div class='sec-rule'>Primary evaluation in GHI space</div>",
         unsafe_allow_html=True,
     )
     st.caption(
-        "Lower is better for CRPS, RMSE, MAE, energy score, variogram score, "
-        "and calibration error. Coverage should be close to 0.80."
+        "GHI metrics are calculated after converting every ensemble member and "
+        "the observed truth with the future clear-sky GHI. Lower is better for "
+        "all error scores; coverage should be close to 0.80."
     )
 
-    metrics_df = pd.DataFrame(rows).set_index("Model")
+    ghi_columns = [
+        "GHI CRPS (W/m²)",
+        "GHI nCRPS",
+        "GHI RMSE (W/m²)",
+        "GHI nRMSE",
+        "GHI MAE (W/m²)",
+        "GHI 80% coverage",
+        "GHI energy score",
+        "GHI variogram score",
+        "GHI ramp CRPS",
+        "GHI day-total CRPS",
+        "GHI n ramp CRPS",
+        "GHI n day-total CRPS",
+    ]
+
+    ghi_columns = [c for c in ghi_columns if c in metrics_df.columns]
+
     st.dataframe(
-        metrics_df,
+        metrics_df[ghi_columns].style.format("{:.4f}"),
         width="stretch",
-        hide_index=False,
     )
+
+    with st.expander("Secondary CSI diagnostics"):
+        csi_columns = [
+            "CSI CRPS",
+            "CSI nCRPS",
+            "CSI RMSE",
+            "CSI nRMSE",
+            "CSI ramp CRPS",
+            "CSI day-total CRPS",
+        ]
+        st.dataframe(
+            metrics_df[csi_columns].style.format("{:.4f}"),
+            width="stretch",
+        )
+
 
 # ==============================================================================
 # TAB: About
@@ -1849,5 +1892,4 @@ python -m pip install -r requirements.txt
 streamlit run app.py""",
         language="bash",
     )
-
 

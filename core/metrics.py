@@ -125,6 +125,8 @@ class MemberCalibrator:
 
     def fit(self, ens, truth, mask, b_grid=None, a_grid=None):
 
+
+
         ens = np.asarray(ens, np.float64)
         truth = np.asarray(truth, np.float64)
         mask = np.asarray(mask, bool)
@@ -200,6 +202,8 @@ class MemberCalibrator:
 
 
 def diebold_mariano(loss_a, loss_b, lag):
+
+
 
     d = np.asarray(loss_a, np.float64) - np.asarray(loss_b, np.float64)
     d = d[np.isfinite(d)]
@@ -322,6 +326,14 @@ def _operator_metrics(pred_ens, truth, mask, K, n_days, ghi_cs=None):
     if have_g:
         out["daytotal_energy_crps"] = _scalar_crps(en_pred, en_true)
         out["daytotal_energy_coverage_80"] = _scalar_cov(en_pred, en_true)
+        energy_values = np.asarray(en_true, np.float64)
+        energy_values = energy_values[np.isfinite(energy_values)]
+        energy_scale = float(np.mean(np.abs(energy_values))) if energy_values.size else np.nan
+        out["daytotal_energy_ncrps"] = (
+            out["daytotal_energy_crps"] / energy_scale
+            if np.isfinite(energy_scale) and energy_scale > 1e-12
+            else np.nan
+        )
     return out
 
 
@@ -362,14 +374,81 @@ def evaluate(pred_ens, truth, mask, cfg, K=None, n_days=None, ghi_cs=None):
            "enh_frac_err": float(abs(ep - et)),
            "n_windows": int(truth.shape[0])}
 
+    csi_values = np.asarray(truth[mask], np.float64)
+    csi_values = csi_values[np.isfinite(csi_values)]
+    csi_scale = float(np.mean(np.abs(csi_values))) if csi_values.size else np.nan
+    out["ncrps_csi"] = (
+        out["crps"] / csi_scale
+        if np.isfinite(csi_scale) and csi_scale > 1e-12
+        else np.nan
+    )
+    out["nrmse_csi"] = (
+        out["rmse"] / csi_scale
+        if np.isfinite(csi_scale) and csi_scale > 1e-12
+        else np.nan
+    )
+
     if ghi_cs is not None:
         g = np.asarray(ghi_cs, np.float64)
-        w = np.where(mask & np.isfinite(g), g, np.nan)
-        out["crps_ghi_weighted"] = float(np.nansum(w * per_step)
-                                         / max(np.nansum(w), 1e-9))
-        e2g = np.where(mask & np.isfinite(g),
-                       ((mean_pred - truth) * g) ** 2, np.nan)
-        out["rmse_ghi"] = float(np.sqrt(np.nanmean(e2g)))
+        valid_ghi = mask & np.isfinite(g)
+        pred_ghi = pred_ens * g[:, None, :]
+        truth_ghi = truth * g
+        ghi_per_step = crps_masked(pred_ghi, truth_ghi, valid_ghi, per_step=True)
+        out["crps_ghi"] = float(np.nanmean(ghi_per_step))
+        out["crps_ghi_weighted"] = out["crps_ghi"]
+        mean_pred_ghi = pred_ghi.mean(axis=1)
+        err_ghi = np.where(valid_ghi, mean_pred_ghi - truth_ghi, np.nan)
+        out["rmse_ghi"] = float(np.sqrt(np.nanmean(err_ghi ** 2)))
+        out["mae_ghi"] = float(np.nanmean(np.abs(err_ghi)))
+        ghi_values = np.asarray(truth_ghi[valid_ghi], np.float64)
+        ghi_values = ghi_values[np.isfinite(ghi_values)]
+        ghi_scale = float(np.mean(np.abs(ghi_values))) if ghi_values.size else np.nan
+        out["ncrps_ghi"] = (
+            out["crps_ghi"] / ghi_scale
+            if np.isfinite(ghi_scale) and ghi_scale > 1e-12
+            else np.nan
+        )
+        out["nrmse_ghi"] = (
+            out["rmse_ghi"] / ghi_scale
+            if np.isfinite(ghi_scale) and ghi_scale > 1e-12
+            else np.nan
+        )
+        out["nmae_ghi"] = (
+            out["mae_ghi"] / ghi_scale
+            if np.isfinite(ghi_scale) and ghi_scale > 1e-12
+            else np.nan
+        )
+        ql_ghi = np.quantile(pred_ghi, lo, axis=1)
+        qh_ghi = np.quantile(pred_ghi, hi, axis=1)
+        out["coverage_80_ghi"] = _masked_mean(
+            ((truth_ghi >= ql_ghi) & (truth_ghi <= qh_ghi)).astype(float),
+            valid_ghi,
+        )
+        pit_ghi = (pred_ghi < truth_ghi[:, None, :]).mean(axis=1)[valid_ghi]
+        p_ghi = np.sort(pit_ghi)
+        u_ghi = (np.arange(len(p_ghi)) + 0.5) / max(len(p_ghi), 1)
+        out["calibration_err_ghi"] = (
+            float(np.mean(np.abs(p_ghi - u_ghi))) if len(p_ghi) else np.nan
+        )
+        ghi_joint = _operator_metrics(
+            pred_ghi, truth_ghi, valid_ghi, K, n_days, ghi_cs=None
+        ) if K and n_days else {}
+        out["energy_score_ghi"] = ghi_joint.get("energy_score", np.nan)
+        out["variogram_score_ghi"] = ghi_joint.get("variogram_score", np.nan)
+        out["daytotal_ghi_crps"] = ghi_joint.get("daytotal_crps", np.nan)
+        out["daytotal_ghi_coverage_80"] = ghi_joint.get("daytotal_coverage_80", np.nan)
+        out["ramp_crps_ghi"] = ghi_joint.get("ramp_crps", np.nan)
+        for source, target in [
+            ("energy_score_ghi", "nenergy_score_ghi"),
+            ("variogram_score_ghi", "nvariogram_score_ghi"),
+            ("ramp_crps_ghi", "nramp_crps_ghi"),
+            ("daytotal_ghi_crps", "ndaytotal_ghi_crps"),
+        ]:
+            out[target] = (
+                out[source] / ghi_scale
+                if np.isfinite(ghi_scale) and ghi_scale > 1e-12
+                else np.nan
+            )
 
     if K and n_days:
         by = {"crps": [], "rmse": [], "coverage_80": []}
@@ -462,6 +541,8 @@ class DeepQuantile(FlowMatcher):
         zeros_state = None                               # per-batch buffer
 
         def pinball(rows, train_mode=False):
+
+
 
             B = len(rows)
             nonlocal zeros_state
