@@ -1,7 +1,125 @@
+"""
+================================================================================
+ forecast_variants.py  --  forecast every variant, plot them against each other
+================================================================================
 
-# forecast_variants.py  --  forecast every variant, plot them against each other
+Superset of the old forecast_and_plot.py. Same job (load a checkpoint, forecast,
+draw a fan chart) plus everything needed to stress-test a model's behaviour
+when its inputs are incomplete, or absent entirely:
 
+  1. AVAILABILITY VARIANTS -- forecast the SAME rows under up to four
+     information conditions: full, no-history, no-NWP, neither. Each variant
+     is only computed if the checkpoint's OWN training config/prior shows it
+     was actually prepared for that condition (capability_report()) --
+     otherwise it is SKIPPED by default with a printed reason, not silently
+     forecast as if it were trustworthy. Pass --allow-unsupported to compute
+     a skipped variant anyway, loudly labeled as a diagnostic. Concretely:
+     'no_history' needs train.history_dropout > 0 (this codebase's only
+     dropout knob). 'no_nwp' needs EITHER an NWP-dropout regularizer (does
+     not exist in this codebase yet) OR a prior that isn't NWP-anchored --
+     NWP enters this codebase two separate ways (conditioning channels vs
+     the 'nwp' prior's anchor) and only the latter (prior.kind == 'nwp')
+     actually depends on NWP being present; the conditioning channels
+     zero-fill safely by architecture regardless of prior. See the
+     SAFEGUARDS note below.
 
+  2. COLD-START GENERATION -- forecast for a bare location (lat/lon/alt) and a
+     calendar date range with NO sensor history and NO NWP at all: the only
+     inputs are solar geometry (zenith) and a clear-sky irradiance model
+     (pvlib Ineichen), computed from scratch. This is the "new site, day one"
+     case -- what the model can say about a place before any data exists.
+     Same capability guard as above: refuses by default unless the
+     checkpoint was trained to cope with missing history AND NWP absence is
+     safe for it (no NWP conditioning at all, NWP-dropout training, or a
+     prior that isn't NWP-anchored).
+
+  3. ROLLOUT VARIANTS -- chain the forecast forward in blocks of
+     `task.forecast_days` days two ways:
+       - "direct"        : every block is forecast from its own TRUE recorded
+                            history (teacher forcing / no compounding).
+       - "autoregressive" : only the FIRST block uses true history; every
+                            later block's history is the model's OWN previous
+                            forecast fed back in (point feedback by default --
+                            the ensemble median -- or full path-wise ensemble
+                            feedback with --rollout-ensemble).
+     Comparing the two shows how fast the forecast degrades under compounding
+     error vs a model that is always re-grounded in real observations.
+
+  4. MULTI-MODEL COMPARISON -- overlay a chosen flow-matching checkpoint
+     against the deep_quantile baseline and/or the classical baselines
+     (day_persistence, peen, ch_peen, analog_day, nwp_direct) on one fan
+     chart: the flow model gets full quantile shading, everything else is
+     drawn as a single median/point line for reference. Shape-checked up
+     front (H_in/H_out/K) so a mismatched deep_quantile checkpoint fails
+     fast with a clear message instead of a cryptic tensor error, and any
+     baseline that can't fit on this windows file (e.g. nwp_direct with no
+     fut_nwp_csi) is skipped with a reason rather than crashing the run.
+
+SAFEGUARDS -- "what a checkpoint doesn't have, it can't do"
+  capability_report(fm) reads a checkpoint's OWN training config/prior
+  (never its output) to decide what it was actually prepared for: whether
+  train.history_dropout was on, whether it has NWP conditioning at all,
+  whether its PRIOR is NWP-anchored (prior.kind == 'nwp', via
+  DayPrior.needs_nwp -- distinct from having NWP conditioning channels), and
+  (today, always False, since no such knob exists in this codebase) whether
+  it had NWP-dropout training. availability_variants() and
+  coldstart_forecast() consult this before computing anything, and refuse
+  (skip, or raise UnsupportedByCheckpoint) rather than hand back a forecast
+  for a condition the network was never exposed to -- EXCEPT for 'no_nwp' on
+  a non-NWP-anchored-prior checkpoint, which is allowed by default because
+  fullCode_v2.py's own conditioning code (FlowMatcher._fut_extras) zero-
+  fills absent NWP channels architecturally, not as a guess. Every guard has
+  one explicit override, --allow-unsupported, which still runs the request
+  but labels the result as a diagnostic probe of off-manifold behavior, not
+  a forecast -- and _warn_if_ood() double-checks the output afterward in
+  case it still looks physically implausible.
+
+NOTE on "a lot of dropout logic" -- there are two, different, dropout knobs:
+  * train.history_dropout (model.py): a TRAINING regularizer that blanks
+    history for a random subset of BATCHES so the velocity field learns to
+    cope without it. It has no effect at inference time by itself.
+  * inference-time "missing" inputs (this file): hist_mask=all-False /
+    fut_nwp=None. The network was built to be NaN/absence-safe for BOTH
+    (masked-mean clamp + cross-attention dummy-key guard + zero-filled NWP
+    channels), so passing genuinely absent data at forecast time is exactly
+    the situation training tried to prepare it for -- this file's job is to
+    make trying that easy and to test that it doesn't crash.
+  Availability variant "no_history" additionally zeroes the HISTORY ZENITH
+  channel (not just content+mask), because that is what history_dropout
+  actually zeroed during training (see FlowMatcher.fit); leaving zenith
+  "leaking" through would test a condition the model never saw.
+
+--------------------------------------------------------------------------------
+ USAGE
+--------------------------------------------------------------------------------
+  # what checkpoints do I have?
+  python forecast_variants.py list --models-dir models/day_ahead
+
+  # plain forecast + plot (same as the old forecast_and_plot.py)
+  python forecast_variants.py forecast --checkpoint models/day_ahead/pooled_flow_gauss_nwp_final.pt \
+      --windows data/day_ahead_windows.npz --rows 0 1 --mode ghi --out forecasts
+
+  # what does the model say with/without history, with/without NWP?
+  python forecast_variants.py availability --checkpoint ...final.pt \
+      --windows data/day_ahead_windows.npz --rows 0 --out forecasts
+
+  # cold start: nothing but a location and the calendar
+  python forecast_variants.py coldstart --checkpoint ...final.pt \
+      --lat 40.05192 --lon -88.37309 --alt 213 --start-date 2024-06-01 --out forecasts
+
+  # autoregressive vs direct 9-day rollout (3 blocks of 3 days), starting at row 0
+  python forecast_variants.py rollout --checkpoint ...final.pt \
+      --windows data/day_ahead_windows.npz --start-row 0 --n-blocks 3 --out forecasts
+
+  # flow model vs deep_quantile vs every classical baseline, one chart
+  python forecast_variants.py compare --checkpoint ...final.pt \
+      --deep-quantile-checkpoint ...deep_quantile_final.pt \
+      --windows data/day_ahead_windows.npz --rows 0 --baselines all --out forecasts
+
+  # exercise every code path above against synthetic data (no files needed)
+  python forecast_variants.py selftest
+================================================================================
+"""
 from __future__ import annotations
 import os
 import re
@@ -14,6 +132,13 @@ from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 
+# the main module: training / FlowMatcher / DeepQuantile / baselines / reps /
+# priors. Try the "installed as a package" layout first (companion-file
+# convention used by the original forecast_and_plot.py), then fall back to a
+# flat sibling file so this script also works dropped next to fullCode_v2.py.
+# try:
+#     import src.flowmodel as core
+# except ImportError:                                     # pragma: no cover
 import core
 
 
@@ -29,10 +154,10 @@ _DQ_RE = re.compile(
 
 
 def discover_checkpoints(models_dir: str) -> List[Dict[str, Any]]:
-    # Scan `models_dir` for every flow_* / deep_quantile_* checkpoint this
-    # codebase could have written and parse its (kind, rep, prior, fold/final,
-    # run_tag) out of the filename. Unrecognized .pt files are listed with
-    # kind='unknown' rather than dropped, so nothing silently disappears
+    """Scan `models_dir` for every flow_* / deep_quantile_* checkpoint this
+    codebase could have written and parse its (kind, rep, prior, fold/final,
+    run_tag) out of the filename. Unrecognized .pt files are listed with
+    kind='unknown' rather than dropped, so nothing silently disappears."""
     out = []
     for path in sorted(glob.glob(os.path.join(models_dir, "*.pt"))):
         name = os.path.basename(path)
@@ -75,8 +200,8 @@ def print_checkpoints(models_dir: str):
 
 
 def load_any(path: str, device=None):
-    # Load a checkpoint regardless of whether it is a FlowMatcher or a
-    # DeepQuantile save -- reads the `format` tag inside and dispatches
+    """Load a checkpoint regardless of whether it is a FlowMatcher or a
+    DeepQuantile save -- reads the `format` tag inside and dispatches."""
     import torch
     device = device or core.get_device("auto")
     peek = torch.load(path, map_location=device, weights_only=False)
@@ -94,18 +219,22 @@ BASELINE_CLASSES = {
         K, Fd, cfg["experiment"].get("peen_days", 3)),
     "ch_peen": lambda K, Fd, cfg: core.CHPeEn(K, Fd),
     "analog_day": lambda K, Fd, cfg: core.AnalogDay(K, Fd),
+    "blend": lambda K, Fd, cfg: core.BlendPersistence(
+        K, Fd, mode="least_squares"),
+    "blend_corr": lambda K, Fd, cfg: core.BlendPersistence(
+        K, Fd, mode="correlation"),
     "nwp_direct": lambda K, Fd, cfg: core.NWPDirect(K, Fd),
 }
 
 
 def fit_baselines(names: List[str], W: Dict[str, np.ndarray], cfg: dict,
                   K: int, n_days: int, fit_idx: Optional[np.ndarray] = None):
-    # Fit the requested classical baselines on windows `fit_idx` (default:
-    # all rows in W). Baselines aren't checkpointed by `run` (they're cheap
-    # numpy objects, refit on demand), so this is how a comparison plot gets
-    # one. Rows that can't be fit (e.g. nwp_direct with no NWP in W) are
-    # skipped with a warning rather than raising, so one bad baseline doesn't
-    # sink the whole comparison
+    """Fit the requested classical baselines on windows `fit_idx` (default:
+    all rows in W). Baselines aren't checkpointed by `run` (they're cheap
+    numpy objects, refit on demand), so this is how a comparison plot gets
+    one. Rows that can't be fit (e.g. nwp_direct with no NWP in W) are
+    skipped with a warning rather than raising, so one bad baseline doesn't
+    sink the whole comparison."""
     fit_idx = np.arange(W["fut_csi"].shape[0]) if fit_idx is None \
         else np.asarray(fit_idx)
     fitted = {}
@@ -116,6 +245,9 @@ def fit_baselines(names: List[str], W: Dict[str, np.ndarray], cfg: dict,
         try:
             b = BASELINE_CLASSES[name](K, n_days, cfg)
             if name == "analog_day":
+                b.fit(W["hist_csi"][fit_idx], W["fut_csi"][fit_idx],
+                     W["hist_mask"][fit_idx], W["fut_mask"][fit_idx])
+            elif name in {"blend", "blend_corr"}:
                 b.fit(W["hist_csi"][fit_idx], W["fut_csi"][fit_idx],
                      W["hist_mask"][fit_idx], W["fut_mask"][fit_idx])
             elif name == "nwp_direct":
@@ -152,34 +284,34 @@ class UnsupportedByCheckpoint(RuntimeError):
 
 
 def capability_report(fm) -> Dict[str, bool]:
-    # What this checkpoint can and cannot be asked to do, read directly off
-    # its frozen training config (fm.cfg, fm.nwp_spec, fm.site_vec, fm.prior)
-    # -- the same information the checkpoint carries when loaded, so this is
-    # exact, not a guess about behavior.
+    """What this checkpoint can and cannot be asked to do, read directly off
+    its frozen training config (fm.cfg, fm.nwp_spec, fm.site_vec, fm.prior)
+    -- the same information the checkpoint carries when loaded, so this is
+    exact, not a guess about behavior.
 
-    # NWP enters this codebase two SEPARATE ways (fullCode_v2.py's own module
-    # docstring, section on NWP): (A) as extra per-position conditioning
-    # channels (model.condition_nwp), and (B) as the source of the 'nwp'
-    # PRIOR's anchor (DayPrior.needs_nwp, i.e. prior.kind == 'nwp'). These have
-    # very different absence-tolerance, so they get separate fields instead of
-    # being collapsed into one 'has_nwp':
+    NWP enters this codebase two SEPARATE ways (fullCode_v2.py's own module
+    docstring, section on NWP): (A) as extra per-position conditioning
+    channels (model.condition_nwp), and (B) as the source of the 'nwp'
+    PRIOR's anchor (DayPrior.needs_nwp, i.e. prior.kind == 'nwp'). These have
+    very different absence-tolerance, so they get separate fields instead of
+    being collapsed into one 'has_nwp':
 
-    # - Conditioning channels (A) are architecturally absence-safe BY DESIGN,
-    #   not just by luck: FlowMatcher._fut_extras() zero-fills any NWP channel
-    #   that isn't supplied, including the 'present' flag going to 0 -- the
-    #   exact signal the model already sees whenever real HRRR data has a gap
-    #   at inference *and* training time (fullCode_v2.py: 'Both doors are
-    #   optional and degrade gracefully to the no-NWP behaviour when the
-    #   columns are absent.'). So has_nwp_conditioning alone does not make
-    #   no_nwp unsupported.
-    # - The 'nwp' prior anchor (B) is where a checkpoint can genuinely be
-    #   "anchored to NWP": DayPrior._anchor() falls back to the clear-sky
-    #   anchor when fut_nwp_anchor is None rather than crashing, but that is a
-    #   real change of source distribution, not a no-op. Only checkpoints
-    #   trained with prior.kind == 'nwp' (DayPrior.needs_nwp) carry this
-    #   dependency -- every other prior (clearsky/climatology/persistence/
-    #   blend/white) never reads fut_nwp at all in _anchor().
-    
+    - Conditioning channels (A) are architecturally absence-safe BY DESIGN,
+      not just by luck: FlowMatcher._fut_extras() zero-fills any NWP channel
+      that isn't supplied, including the 'present' flag going to 0 -- the
+      exact signal the model already sees whenever real HRRR data has a gap
+      at inference *and* training time (fullCode_v2.py: 'Both doors are
+      optional and degrade gracefully to the no-NWP behaviour when the
+      columns are absent.'). So has_nwp_conditioning alone does not make
+      no_nwp unsupported.
+    - The 'nwp' prior anchor (B) is where a checkpoint can genuinely be
+      "anchored to NWP": DayPrior._anchor() falls back to the clear-sky
+      anchor when fut_nwp_anchor is None rather than crashing, but that is a
+      real change of source distribution, not a no-op. Only checkpoints
+      trained with prior.kind == 'nwp' (DayPrior.needs_nwp) carry this
+      dependency -- every other prior (clearsky/climatology/persistence/
+      blend/white) never reads fut_nwp at all in _anchor().
+    """
     t = fm.cfg.get("train", {})
     prior = getattr(fm, "prior", None)     # None for DeepQuantile checkpoints
     return {
@@ -204,12 +336,12 @@ def capability_report(fm) -> Dict[str, bool]:
 
 
 def _nwp_absence_ok(cap: Dict[str, bool]) -> bool:
-    # True if it's safe to compute a variant with NWP fully absent for this
-    # checkpoint by default (no diagnostic label needed): either it was
-    # explicitly trained for it (nwp_dropout_trained -- doesn't exist in this
-    # codebase today, kept for forward-compat), or its prior isn't NWP-
-    # anchored, in which case NWP is only a conditioning channel that
-    # architecturally zero-fills (see capability_report's docstring)
+    """True if it's safe to compute a variant with NWP fully absent for this
+    checkpoint by default (no diagnostic label needed): either it was
+    explicitly trained for it (nwp_dropout_trained -- doesn't exist in this
+    codebase today, kept for forward-compat), or its prior isn't NWP-
+    anchored, in which case NWP is only a conditioning channel that
+    architecturally zero-fills (see capability_report's docstring)."""
     return cap["nwp_dropout_trained"] or not cap["nwp_anchored_prior"]
 
 
@@ -233,11 +365,11 @@ def _require(ok: bool, message: str, allow_unsupported: bool):
 # ===== SECTION: availability variants =======================================
 # ============================================================================
 def zero_history(hist_csi, hist_zen, hist_mask):
-    # Blank history the way train.history_dropout blanks it: content AND
-    # the zenith channel AND the mask, all zeroed/all-False. Matches
-    # FlowMatcher.fit's dropout exactly (hist_t *= 0; hm_t &= False) so
-    # 'no_history' at inference reproduces a condition the net actually trained
-    # under, rather than a new, unseen partial-blank state
+    """Blank history the way train.history_dropout blanks it: content AND
+    the zenith channel AND the mask, all zeroed/all-False. Matches
+    FlowMatcher.fit's dropout exactly (hist_t *= 0; hm_t &= False) so
+    'no_history' at inference reproduces a condition the net actually trained
+    under, rather than a new, unseen partial-blank state."""
     hist_csi = np.zeros_like(np.asarray(hist_csi, np.float32))
     hist_zen = np.zeros_like(np.asarray(hist_zen, np.float32))
     hist_mask = np.zeros_like(np.asarray(hist_mask, bool))
@@ -247,24 +379,24 @@ def zero_history(hist_csi, hist_zen, hist_mask):
 def availability_variants(fm, W: Dict[str, np.ndarray], rows: np.ndarray,
                           n_ensemble=100, seed=0, nwp_fill="zero",
                           allow_unsupported=False):
-    # Forecast `rows` under every information condition this checkpoint can
-    # ACTUALLY be asked about, per capability_report(). Variants the checkpoint
-    # was never trained for are SKIPPED by default (reported, not silently
-    # dropped) rather than computed and plotted as if they were forecasts --
-    # pass allow_unsupported=True to compute them anyway as labeled
-    # diagnostics.
+    """Forecast `rows` under every information condition this checkpoint can
+    ACTUALLY be asked about, per capability_report(). Variants the checkpoint
+    was never trained for are SKIPPED by default (reported, not silently
+    dropped) rather than computed and plotted as if they were forecasts --
+    pass allow_unsupported=True to compute them anyway as labeled
+    diagnostics.
 
-    # Guard rules (see capability_report):
-    #   'no_history'         needs history_dropout_trained
-    #   'no_nwp'/'..._no_nwp' need nwp_dropout_trained (today: no checkpoint in
-    #                         this codebase has this, since there is no such
-    #                         training knob -- so these are blocked unless you
-    #                         explicitly override, every time, until fit() grows
-    #                         an nwp_dropout regularizer)
+    Guard rules (see capability_report):
+      'no_history'         needs history_dropout_trained
+      'no_nwp'/'..._no_nwp' need nwp_dropout_trained (today: no checkpoint in
+                            this codebase has this, since there is no such
+                            training knob -- so these are blocked unless you
+                            explicitly override, every time, until fit() grows
+                            an nwp_dropout regularizer)
 
-    # Returns (variants, skipped): variants is {name: ensemble}; skipped is
-    # {name: reason} for anything not computed.
-    
+    Returns (variants, skipped): variants is {name: ensemble}; skipped is
+    {name: reason} for anything not computed.
+    """
     hist_csi, hist_zen, hist_mask = (W["hist_csi"][rows], W["hist_zen"][rows],
                                      W["hist_mask"][rows])
     fut_zen, fut_mask = W["fut_zen"][rows], W["fut_mask"][rows]
@@ -342,11 +474,11 @@ def availability_variants(fm, W: Dict[str, np.ndarray], rows: np.ndarray,
 
 
 def neutral_nwp_fill(fm, fut_ghi_cs):
-    # Build an NWP dict that claims presence (present=1) but supplies
-    # climatologically neutral content instead of zero: dswrf ~ clear-sky GHI
-    # (implies CSI=1, i.e. "assume typical/clear"), cloud cover at 50%, NWP-CSI
-    # at 1.0. Purely diagnostic (real absence should carry present=0) -- see
-    # availability_variants' docstring for why this variant exists
+    """Build an NWP dict that claims presence (present=1) but supplies
+    climatologically neutral content instead of zero: dswrf ~ clear-sky GHI
+    (implies CSI=1, i.e. "assume typical/clear"), cloud cover at 50%, NWP-CSI
+    at 1.0. Purely diagnostic (real absence should carry present=0) -- see
+    availability_variants' docstring for why this variant exists."""
     N, H = np.asarray(fut_ghi_cs).shape
     out = {}
     for key, kind in getattr(fm, "nwp_spec", []):
@@ -362,11 +494,11 @@ def neutral_nwp_fill(fm, fut_ghi_cs):
 
 
 def _warn_if_ood(name, ens, fut_mask, fut_ghi_cs, cfg, csi_alarm=1.25):
-    # Flag predictions that land far outside a physically ordinary CSI range
-    # on a meaningful fraction of valid steps -- the signature of a model
-    # extrapolating outside its training distribution (see
-    # availability_variants' docstring). Doesn't raise or alter the forecast,
-    # just makes an easy-to-miss problem loud
+    """Flag predictions that land far outside a physically ordinary CSI range
+    on a meaningful fraction of valid steps -- the signature of a model
+    extrapolating outside its training distribution (see
+    availability_variants' docstring). Doesn't raise or alter the forecast,
+    just makes an easy-to-miss problem loud."""
     if name == "full":
         return
     mask = np.asarray(fut_mask, bool)
@@ -394,20 +526,20 @@ def geometry_from_coords(lat: float, lon: float, alt: float,
                          start_date: str, K: int, n_days: int,
                          resolution_min: float = 10.0,
                          noon_col: Optional[int] = None):
-    # Compute fut_zen / fut_mask / fut_ghi_cs for `n_days` calendar days
-    # starting at `start_date`, purely from astronomy (pvlib solar position +
-    # the Ineichen clear-sky model with climatological Linke turbidity) --
-    # exactly what is knowable about a location before any sensor or NWP data
-    # exists. Output is noon-centered on `noon_col` (default K//2, since a
-    # cold-start forecast has no historical grid to align to -- any consistent
-    # noon-centering works as long as it's used consistently, which it is
-    # here). Steps outside +/-zenith_daylight_max degrees are masked False,
-    # matching how preprocess() builds the daylight mask.
+    """Compute fut_zen / fut_mask / fut_ghi_cs for `n_days` calendar days
+    starting at `start_date`, purely from astronomy (pvlib solar position +
+    the Ineichen clear-sky model with climatological Linke turbidity) --
+    exactly what is knowable about a location before any sensor or NWP data
+    exists. Output is noon-centered on `noon_col` (default K//2, since a
+    cold-start forecast has no historical grid to align to -- any consistent
+    noon-centering works as long as it's used consistently, which it is
+    here). Steps outside +/-zenith_daylight_max degrees are masked False,
+    matching how preprocess() builds the daylight mask.
 
-    # Returns dict with fut_zen, fut_mask, fut_ghi_cs, each [1, K*n_days], plus
-    # the site_coords row [1,3] normalized the same way `_site_coord_vec` does
-    # (only meaningful for checkpoints with condition_site on).
-    
+    Returns dict with fut_zen, fut_mask, fut_ghi_cs, each [1, K*n_days], plus
+    the site_coords row [1,3] normalized the same way `_site_coord_vec` does
+    (only meaningful for checkpoints with condition_site on).
+    """
     import pvlib
     noon_col = K // 2 if noon_col is None else int(noon_col)
     zen_max = 85.0
@@ -464,22 +596,22 @@ def coldstart_forecast(fm, lat: float, lon: float, alt: float,
                        start_date: str, n_ensemble=100, seed=0,
                        resolution_min=10.0, noon_col=None,
                        allow_unsupported=False):
-    # Forecast for a bare location with NO history and NO NWP -- geometry +
-    # clear-sky only. Returns (ensemble [1,M,H_out], geometry dict) so the
-    # caller can plot it with plot_forecast(mode='ghi', ghi_cs_row=...).
+    """Forecast for a bare location with NO history and NO NWP -- geometry +
+    clear-sky only. Returns (ensemble [1,M,H_out], geometry dict) so the
+    caller can plot it with plot_forecast(mode='ghi', ghi_cs_row=...).
 
-    # Guarded by capability_report(): a cold start is inherently a
-    # 'no_history' + 'no_nwp' request (there IS no history or NWP for a
-    # location before any data exists), so it is only allowed by default when
-    # the checkpoint was trained with history_dropout AND NWP absence is safe
-    # for it -- either no NWP conditioning at all, NWP-dropout training (does
-    # not exist in this codebase today), or a prior that isn't NWP-anchored
-    # (see capability_report()/_nwp_absence_ok() docstrings: only prior.kind
-    # == 'nwp' actually depends on NWP being present; every other prior
-    # ignores fut_nwp entirely, and the conditioning channels zero-fill by
-    # design regardless of prior). Pass allow_unsupported=True to run it
-    # anyway as a labeled diagnostic.
-    
+    Guarded by capability_report(): a cold start is inherently a
+    'no_history' + 'no_nwp' request (there IS no history or NWP for a
+    location before any data exists), so it is only allowed by default when
+    the checkpoint was trained with history_dropout AND NWP absence is safe
+    for it -- either no NWP conditioning at all, NWP-dropout training (does
+    not exist in this codebase today), or a prior that isn't NWP-anchored
+    (see capability_report()/_nwp_absence_ok() docstrings: only prior.kind
+    == 'nwp' actually depends on NWP being present; every other prior
+    ignores fut_nwp entirely, and the conditioning channels zero-fill by
+    design regardless of prior). Pass allow_unsupported=True to run it
+    anyway as a labeled diagnostic.
+    """
     cap = capability_report(fm)
     _require(cap["history_dropout_trained"],
             "coldstart has zero history, but this checkpoint's "
@@ -535,9 +667,9 @@ def coldstart_forecast(fm, lat: float, lon: float, alt: float,
 # ============================================================================
 def _find_block_rows(W: Dict[str, np.ndarray], start_row: int, n_blocks: int,
                      n_days: int) -> List[int]:
-    # Consecutive, NON-overlapping n_days-day blocks starting at start_row,
-    # found by matching first_day_ord (windows are daily-stride, so a block's
-    # forecast horizon is exactly the next block's most-recent history)
+    """Consecutive, NON-overlapping n_days-day blocks starting at start_row,
+    found by matching first_day_ord (windows are daily-stride, so a block's
+    forecast horizon is exactly the next block's most-recent history)."""
     fdo = W["first_day_ord"]
     rows = [int(start_row)]
     target = int(fdo[start_row]) + n_days
@@ -556,24 +688,24 @@ def _find_block_rows(W: Dict[str, np.ndarray], start_row: int, n_blocks: int,
 def rollout_forecast(fm, W: Dict[str, np.ndarray], start_row: int,
                      n_blocks: int, mode: str = "autoregressive",
                      n_ensemble=100, seed=0, feedback="median"):
-    # Chain forecasts across `n_blocks` consecutive forecast-day blocks.
+    """Chain forecasts across `n_blocks` consecutive forecast-day blocks.
 
-    # mode='direct'         : each block forecast from its own TRUE history
-    #                          (teacher forcing).
-    # mode='autoregressive'  : block 0 uses true history; every later block's
-    #                          history has its most recent n_days*K steps
-    #                          REPLACED by the previous block's own forecast.
-    # feedback='median'     : feed forward the ensemble median (fast, one
-    #                          trajectory).
-    # feedback='ensemble'   : feed forward all M members independently (each
-    #                          ensemble path is rolled forward on its own,
-    #                          giving M genuinely different future histories --
-    #                          slower but statistically honest compounding).
+    mode='direct'         : each block forecast from its own TRUE history
+                             (teacher forcing).
+    mode='autoregressive'  : block 0 uses true history; every later block's
+                             history has its most recent n_days*K steps
+                             REPLACED by the previous block's own forecast.
+    feedback='median'     : feed forward the ensemble median (fast, one
+                             trajectory).
+    feedback='ensemble'   : feed forward all M members independently (each
+                             ensemble path is rolled forward on its own,
+                             giving M genuinely different future histories --
+                             slower but statistically honest compounding).
 
-    # Returns dict: {"rows": [...], "pred": [n_blocks, M, H_out] or
-    # [n_blocks, M, H_out] per-path for ensemble feedback, "truth":
-    # [n_blocks, H_out], "mask": [n_blocks, H_out]}.
-    
+    Returns dict: {"rows": [...], "pred": [n_blocks, M, H_out] or
+    [n_blocks, M, H_out] per-path for ensemble feedback, "truth":
+    [n_blocks, H_out], "mask": [n_blocks, H_out]}.
+    """
     if mode not in ("direct", "autoregressive"):
         raise ValueError("mode must be 'direct' or 'autoregressive'")
     K, n_days = fm.K, fm.n_days
@@ -659,21 +791,21 @@ def rollout_forecast_days(fm, W: Dict[str, np.ndarray], start_row: int,
                           n_days_requested: int,
                           mode: str = "autoregressive", n_ensemble=100,
                           seed=0, feedback="median"):
-    # Forecast exactly ``n_days_requested`` days by chaining model blocks.
+    """Forecast exactly ``n_days_requested`` days by chaining model blocks.
 
-    # A trained checkpoint predicts ``fm.n_days`` days per call. This helper
-    # converts the user-facing request into the required number of complete
-    # blocks, runs the existing day-by-day autoregressive rollout, concatenates
-    # the generated blocks, and trims the returned trajectory to exactly the
-    # requested horizon. For ``mode='autoregressive'``, every block after the
-    # first receives the previous block's generated forecast as history; no
-    # later block is silently re-grounded in observations.
+    A trained checkpoint predicts ``fm.n_days`` days per call. This helper
+    converts the user-facing request into the required number of complete
+    blocks, runs the existing day-by-day autoregressive rollout, concatenates
+    the generated blocks, and trims the returned trajectory to exactly the
+    requested horizon. For ``mode='autoregressive'``, every block after the
+    first receives the previous block's generated forecast as history; no
+    later block is silently re-grounded in observations.
 
-    # The returned dictionary contains ``pred`` with shape ``[M, K*n_days]``,
-    # plus concatenated truth/mask arrays and the source block rows. A request
-    # that cannot be supported by the saved daily windows raises a clear error
-    # before expensive inference begins.
-    
+    The returned dictionary contains ``pred`` with shape ``[M, K*n_days]``,
+    plus concatenated truth/mask arrays and the source block rows. A request
+    that cannot be supported by the saved daily windows raises a clear error
+    before expensive inference begins.
+    """
     requested = int(n_days_requested)
     if requested < 1:
         raise ValueError("n_days_requested must be at least 1")
@@ -733,12 +865,12 @@ def forecast_from_arrays(fm, hist_csi, hist_zen, fut_zen, hist_mask, fut_mask,
 # ============================================================================
 def _extend_clearsky_envelope(gcs_row, mask_row, K, n_days, zenith_row=None,
                                zenith_cutoff=85.0):
-    # Complete clear-sky reference values only in valid daylight geometry.
+    """Complete clear-sky reference values only in valid daylight geometry.
 
-    # At solar zenith > 85 degrees, no polynomial clear-sky completion is
-    # allowed: the returned reference is NaN and the model output remains the
-    # only plotted forecast contribution at that position.
-    
+    At solar zenith > 85 degrees, no polynomial clear-sky completion is
+    allowed: the returned reference is NaN and the model output remains the
+    only plotted forecast contribution at that position.
+    """
     H = K * n_days
     out = np.full(H, np.nan)
     for b in range(n_days):
@@ -824,23 +956,23 @@ def plot_comparison(series: Dict[str, Optional[np.ndarray]], truth_row,
                     primary: Optional[str] = None,
                     spaghetti=False, spaghetti_alpha=0.05, spaghetti_max=60,
                     style: Optional[str] = None):
-    # Fan chart for a PRIMARY series (full quantile shading) plus any number
-    # of comparison series (median-only line each, distinct color).
+    """Fan chart for a PRIMARY series (full quantile shading) plus any number
+    of comparison series (median-only line each, distinct color).
 
-    # series : {label: pred_ens [M,H_out] or None}. `primary` selects which key
-    #          gets the shaded fan; defaults to the first key. A comparison
-    #          series with only 1 member (a point-forecast baseline like
-    #          day_persistence or nwp_direct) still works -- its "median" is
-    #          just that one value.
-    # style : high-level display choice for the PRIMARY series --
-    #          "bands" (default): shaded quantile bands only.
-    #          "scenarios": individual simulated trajectories only, no bands.
-    #          None: legacy behaviour, controlled by `spaghetti` below.
-    # spaghetti : legacy per-flag control, used only when `style` is None: if
-    #          True, overlay up to `spaghetti_max` individual ensemble member
-    #          trajectories on top of the shaded bands. Kept for callers (the
-    #          CLI, the self-test) that don't use `style`.
-    
+    series : {label: pred_ens [M,H_out] or None}. `primary` selects which key
+             gets the shaded fan; defaults to the first key. A comparison
+             series with only 1 member (a point-forecast baseline like
+             day_persistence or nwp_direct) still works -- its "median" is
+             just that one value.
+    style : high-level display choice for the PRIMARY series --
+             "bands" (default): shaded quantile bands only.
+             "scenarios": individual simulated trajectories only, no bands.
+             None: legacy behaviour, controlled by `spaghetti` below.
+    spaghetti : legacy per-flag control, used only when `style` is None: if
+             True, overlay up to `spaghetti_max` individual ensemble member
+             trajectories on top of the shaded bands. Kept for callers (the
+             CLI, the self-test) that don't use `style`.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -896,9 +1028,9 @@ def plot_comparison(series: Dict[str, Optional[np.ndarray]], truth_row,
         return v
 
     def plot_spaghetti(ax, v_plot, color, label_prefix=""):
-        # Draw up to spaghetti_max member trajectories from v_plot [M,H],
-        # evenly sampled across the ensemble (not just the first N) so the
-        # overlay reflects the full spread, not an arbitrary slice
+        """Draw up to spaghetti_max member trajectories from v_plot [M,H],
+        evenly sampled across the ensemble (not just the first N) so the
+        overlay reflects the full spread, not an arbitrary slice."""
         M = v_plot.shape[0]
         if M <= 1:
             return

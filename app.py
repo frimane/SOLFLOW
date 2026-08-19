@@ -1202,178 +1202,86 @@ tab_about, tab_list, tab_forecast, tab_avail, tab_cmp, tab_install = st.tabs(
 
 #------------------------------------------------------
 # helper for the comparator tab
-def render_comparison_metrics(series, truth, mask, fm, ghi_cs=None):
+def render_comparison_metrics(series, truth, mask, fm, ghi_cs=None,
+                              hist_csi=None, hist_mask=None):
     truth = np.asarray(truth, dtype=np.float64).reshape(1, -1)
     mask = np.asarray(mask, dtype=bool).reshape(1, -1)
-
-    # Never score missing observations.
-    score_mask = mask & np.isfinite(truth)
-
-    ghi = None
-    if ghi_cs is not None:
-        ghi = np.asarray(ghi_cs, dtype=np.float64).reshape(1, -1)
-        if ghi.shape != truth.shape:
-            st.error(
-                f"GHI metric error: truth has shape {truth.shape}, "
-                f"but fut_ghi_cs has shape {ghi.shape}."
-            )
-            ghi = None
-
-    valid_csi = int(np.count_nonzero(score_mask))
-    valid_ghi = (
-        int(np.count_nonzero(score_mask & np.isfinite(ghi)))
-        if ghi is not None else 0
-    )
-
-    st.caption(
-        f"Metric inputs — truth: {truth.shape}, mask: {mask.shape}, "
-        f"clear-sky GHI: {None if ghi is None else ghi.shape}, "
-        f"valid CSI points: {valid_csi}, valid GHI points: {valid_ghi}"
-    )
-
+    ghi = None if ghi_cs is None else np.asarray(ghi_cs, dtype=np.float64).reshape(1, -1)
+    valid_csi = int(np.count_nonzero(mask & np.isfinite(truth)))
+    valid_ghi = int(np.count_nonzero(mask & np.isfinite(truth) & np.isfinite(ghi))) if ghi is not None else 0
     if valid_csi == 0:
-        st.error("No valid future observations are available for this window.")
+        st.error("No valid future observations are available for metric evaluation.")
         return
+    if ghi is None or valid_ghi == 0:
+        st.warning("GHI metrics are unavailable: fut_ghi_cs is missing or has no finite values on the evaluation mask.")
 
     rows = []
-    returned_keys = {}
-
     for model_name, ensemble in series.items():
         pred = np.asarray(ensemble, dtype=np.float64)
-
-        # Forecast output from predict_ensemble is [members, horizon].
-        # evaluate() requires [windows, members, horizon].
         if pred.ndim == 2:
             pred = pred[None, :, :]
-
-        if pred.ndim != 3:
-            st.warning(
-                f"Skipping {model_name}: expected [1, members, horizon], "
-                f"received {pred.shape}."
-            )
+        if pred.ndim != 3 or pred.shape[0] != 1 or pred.shape[2] != truth.shape[1]:
+            st.warning(f"Skipping {model_name}: forecast shape is {pred.shape}.")
             continue
-
-        if pred.shape[0] != 1 or pred.shape[2] != truth.shape[1]:
-            st.warning(
-                f"Skipping {model_name}: forecast shape {pred.shape} is "
-                f"incompatible with truth shape {truth.shape}."
-            )
-            continue
-
-        # Invalid model values must not silently become a good score.
-        if not np.isfinite(pred[:, :, score_mask[0]]).all():
-            st.warning(
-                f"Skipping {model_name}: forecast contains non-finite values "
-                "on valid evaluation points."
-            )
-            continue
-
         try:
+            persistence_csi = None
+            if hist_csi is not None and hist_mask is not None:
+                persistence_csi = core.persistence_reference(
+                    np.asarray(hist_csi, dtype=np.float64).reshape(1, -1),
+                    np.asarray(hist_mask, dtype=bool).reshape(1, -1),
+                    int(fm.K), int(fm.n_days),
+                )
             scores = core.evaluate(
-                pred_ens=pred,
-                truth=truth,
-                mask=score_mask,
-                cfg=fm.cfg,
-                K=int(fm.K),
-                n_days=int(fm.n_days),
-                ghi_cs=ghi if valid_ghi > 0 else None,
+                pred_ens=pred, truth=truth, mask=mask, cfg=fm.cfg,
+                K=int(fm.K), n_days=int(fm.n_days),
+                ghi_cs=ghi if valid_ghi else None,
+                persistence_csi=persistence_csi,
             )
         except Exception as exc:
-            st.warning(f"Metric calculation failed for {model_name}: {exc}")
+            st.warning(f"Metrics failed for {model_name}: {exc}")
             continue
-
-        returned_keys[model_name] = sorted(scores.keys())
-
-        rows.append(
-            {
-                "Model": model_name,
-                "GHI CRPS (W/m²)": scores.get("crps_ghi", np.nan),
-                "GHI nCRPS": scores.get("ncrps_ghi", np.nan),
-                "GHI RMSE (W/m²)": scores.get("rmse_ghi", np.nan),
-                "GHI nRMSE": scores.get("nrmse_ghi", np.nan),
-                "GHI MAE (W/m²)": scores.get("mae_ghi", np.nan),
-                "GHI 80% coverage": scores.get("coverage_80_ghi", np.nan),
-                "GHI calibration error": scores.get("calibration_err_ghi", np.nan),
-                "GHI energy score": scores.get("energy_score_ghi", np.nan),
-                "GHI variogram score": scores.get("variogram_score_ghi", np.nan),
-                "GHI ramp CRPS": scores.get("ramp_crps_ghi", np.nan),
-                "GHI n ramp CRPS": scores.get("nramp_crps_ghi", np.nan),
-                "GHI day-total CRPS": scores.get("daytotal_ghi_crps", np.nan),
-                "GHI n day-total CRPS": scores.get("ndaytotal_ghi_crps", np.nan),
-                "CSI CRPS": scores.get("crps", np.nan),
-                "CSI nCRPS": scores.get("ncrps_csi", np.nan),
-                "CSI RMSE": scores.get("rmse", np.nan),
-                "CSI nRMSE": scores.get("nrmse_csi", np.nan),
-                "CSI MAE": scores.get("mae", np.nan),
-                "CSI coverage": scores.get("coverage_80", np.nan),
-                "CSI energy score": scores.get("energy_score", np.nan),
-                "CSI variogram score": scores.get("variogram_score", np.nan),
-                "CSI ramp CRPS": scores.get("ramp_crps", np.nan),
-                "CSI day-total CRPS": scores.get("daytotal_crps", np.nan),
-            }
-        )
-
+        rows.append({
+            "Model": model_name,
+            "GHI CRPS (W/m²)": scores.get("crps_ghi", np.nan),
+            "GHI nCRPS": scores.get("ncrps_ghi", np.nan),
+            "GHI RMSE (W/m²)": scores.get("rmse_ghi", np.nan),
+            "GHI nRMSE": scores.get("nrmse_ghi", np.nan),
+            "GHI MAE (W/m²)": scores.get("mae_ghi", np.nan),
+            "GHI coverage 80%": scores.get("coverage_80_ghi", np.nan),
+            "GHI energy score": scores.get("energy_score_ghi", np.nan),
+            "GHI variogram score": scores.get("variogram_score_ghi", np.nan),
+            "GHI ramp CRPS": scores.get("ramp_crps_ghi", np.nan),
+            "GHI n ramp CRPS": scores.get("nramp_crps_ghi", np.nan),
+            "GHI day-total CRPS": scores.get("daytotal_ghi_crps", np.nan),
+            "GHI n day-total CRPS": scores.get("ndaytotal_ghi_crps", np.nan),
+            "GHI NICE1": scores.get("nice1_ghi", np.nan),
+            "GHI NICE2": scores.get("nice2_ghi", np.nan),
+            "GHI NICE3": scores.get("nice3_ghi", np.nan),
+            "GHI NICEΣ": scores.get("nice_sigma_ghi", np.nan),
+            "CSI CRPS": scores.get("crps", np.nan),
+            "CSI nCRPS": scores.get("ncrps_csi", np.nan),
+            "CSI RMSE": scores.get("rmse", np.nan),
+            "CSI nRMSE": scores.get("nrmse_csi", np.nan),
+            "CSI ramp CRPS": scores.get("ramp_crps", np.nan),
+            "CSI day-total CRPS": scores.get("daytotal_crps", np.nan),
+        })
     if not rows:
-        st.error("No valid model forecasts were available for metric evaluation.")
+        st.error("No model forecasts were available for metric evaluation.")
         return
-
     table = pd.DataFrame(rows).set_index("Model")
-
-    ghi_columns = [
-        "GHI CRPS (W/m²)",
-        "GHI nCRPS",
-        "GHI RMSE (W/m²)",
-        "GHI nRMSE",
-        "GHI MAE (W/m²)",
-        "GHI 80% coverage",
-        "GHI calibration error",
-        "GHI energy score",
-        "GHI variogram score",
-        "GHI ramp CRPS",
-        "GHI n ramp CRPS",
-        "GHI day-total CRPS",
-        "GHI n day-total CRPS",
+    ghi_cols = [
+        "GHI CRPS (W/m²)", "GHI nCRPS", "GHI RMSE (W/m²)", "GHI nRMSE",
+        "GHI MAE (W/m²)", "GHI coverage 80%", "GHI energy score",
+        "GHI variogram score", "GHI ramp CRPS", "GHI n ramp CRPS",
+        "GHI day-total CRPS", "GHI n day-total CRPS",
+        "GHI NICE1", "GHI NICE2", "GHI NICE3", "GHI NICEΣ",
     ]
-
-    st.markdown(
-        "<div class='sec-rule'>Primary metrics in GHI space</div>",
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        "GHI is obtained member by member as CSI × future clear-sky GHI. "
-        "Lower is better for error scores; 80% coverage should be close to 0.80."
-    )
-    st.dataframe(
-        table[ghi_columns].style.format("{:.4f}", na_rep="—"),
-        width="stretch",
-    )
-
+    st.markdown("<div class='sec-rule'>Primary metrics in GHI space</div>", unsafe_allow_html=True)
+    st.caption(f"Valid CSI points: {valid_csi}; valid GHI points: {valid_ghi}. Lower is better for error scores and NICE; NICE < 1 beats persistence. 80% coverage should be near 0.80.")
+    st.dataframe(table[ghi_cols].style.format("{:.4f}"), width="stretch")
     with st.expander("Secondary CSI diagnostics"):
-        csi_columns = [
-            "CSI CRPS",
-            "CSI nCRPS",
-            "CSI RMSE",
-            "CSI nRMSE",
-            "CSI MAE",
-            "CSI coverage",
-            "CSI energy score",
-            "CSI variogram score",
-            "CSI ramp CRPS",
-            "CSI day-total CRPS",
-        ]
-        st.dataframe(
-            table[csi_columns].style.format("{:.4f}", na_rep="—"),
-            width="stretch",
-        )
-
-    with st.expander("Metric diagnostics"):
-        st.json(
-            {
-                "valid_csi_points": valid_csi,
-                "valid_ghi_points": valid_ghi,
-                "returned_keys": returned_keys,
-            }
-        )
+        csi_cols = ["CSI CRPS", "CSI nCRPS", "CSI RMSE", "CSI nRMSE", "CSI ramp CRPS", "CSI day-total CRPS"]
+        st.dataframe(table[csi_cols].style.format("{:.4f}"), width="stretch")
 
 
 # ==============================================================================
@@ -1740,12 +1648,15 @@ with tab_cmp:
     W, w_err = get_windows(ckpt_path)
     baseline_names = list(fv.BASELINE_CLASSES.keys())
     baseline_labels = {
-        "day_persistence": "DayPersistence · yesterday repeated",
+        "day_persistence": "CyclicPersistence · previous-day profile",
         "peen": "PeEn · recent-days persistence ensemble",
         "ch_peen": "CHPeEn · complete-history empirical baseline",
         "analog_day": "AnalogDay · most similar past day",
+        "blend": "BLEND-opti · least-squares persistence blend",
+        "blend_corr": "BLEND-corre · correlation persistence blend",
         "nwp_direct": "NWPDirect · direct NWP-CSI reference",
     }
+
     baselines_display = st.multiselect(
         "Reference methods", list(baseline_labels.values()),
         default=list(baseline_labels.values()), key="cmp_baselines")
@@ -1851,13 +1762,14 @@ with tab_cmp:
             
             render_comparison_metrics(
                 series=series,
-                truth=W["fut_csi"][r],
+                truth=truth,
                 mask=W["fut_mask"][r],
                 fm=fm,
-                ghi_cs=(W["fut_ghi_cs"][r] if "fut_ghi_cs" in W else None),
+                ghi_cs=gcs_full,
+                hist_csi=W["hist_csi"][r],
+                hist_mask=W["hist_mask"][r],
             )
 
-            
             c1, c2 = st.columns(2)
             
             with c1:

@@ -171,6 +171,9 @@ def _preprocess_single(cfg):
 
 def _repad_days(days, K_new, noon_new):
 
+
+
+
     K_old = int(days["K"]); noon_old = int(days["noon_col"])
     if K_old == K_new and noon_old == noon_new:
         return days
@@ -284,6 +287,8 @@ def _print_windows_summary(W):
 
 def run_experiments(cfg, quick=False):
 
+
+
     set_seed(cfg["seed"])
     device = get_device(cfg["train"]["device"])
     W = dict(np.load(cfg["paths"]["windows"]))
@@ -328,13 +333,21 @@ def run_experiments(cfg, quick=False):
         pw_crps: Dict[str, np.ndarray] = {}     # per-window CRPS for the DM test
 
         def score(name, pred):
+            persistence_csi = persistence_reference(
+                W["hist_csi"][te_sorted], W["hist_mask"][te_sorted], K, Fd
+            )
             fold[name] = evaluate(pred, W["fut_csi"][te_sorted],
                                   W["fut_mask"][te_sorted], cfg,
-                                  K=K, n_days=Fd, ghi_cs=gcs_te)
+                                  K=K, n_days=Fd, ghi_cs=gcs_te,
+                                  persistence_csi=persistence_csi)
             pw_crps[name] = crps_per_window(pred, W["fut_csi"][te_sorted],
                                             W["fut_mask"][te_sorted])
 
         def save_model_result(name):
+
+
+
+
 
             mdir = os.path.join(cfg["paths"]["results_dir"], "models")
             os.makedirs(mdir, exist_ok=True)
@@ -356,6 +369,12 @@ def run_experiments(cfg, quick=False):
             "ch_peen": CHPeEn(K, Fd).fit(
                 W["fut_csi"][tr_fit], W["fut_mask"][tr_fit]),
             "analog_day": AnalogDay(K, Fd).fit(
+                W["hist_csi"][tr_fit], W["fut_csi"][tr_fit],
+                W["hist_mask"][tr_fit], W["fut_mask"][tr_fit]),
+            "blend": BlendPersistence(K, Fd, mode="least_squares").fit(
+                W["hist_csi"][tr_fit], W["fut_csi"][tr_fit],
+                W["hist_mask"][tr_fit], W["fut_mask"][tr_fit]),
+            "blend_corr": BlendPersistence(K, Fd, mode="correlation").fit(
                 W["hist_csi"][tr_fit], W["fut_csi"][tr_fit],
                 W["hist_mask"][tr_fit], W["fut_mask"][tr_fit]),
         }
@@ -548,6 +567,7 @@ def run_experiments(cfg, quick=False):
 
 
 def train_final(cfg):
+
 
     set_seed(int(cfg["seed"]))
     device = get_device(cfg["train"]["device"])

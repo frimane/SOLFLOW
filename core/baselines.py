@@ -22,6 +22,11 @@
 #                     that historically followed a similar last day. The
 #                     strongest HISTORY-ONLY reference: coherent real days,
 #                     conditioned on the current regime.
+#   blend           : BLEND persistence benchmark. It combines scalar
+#                     persistence with yesterday's day profile using a
+#                     training-only least-squares weight clipped to [0, 1].
+#   blend_corr      : correlation-weighted BLEND, retained as a separate
+#                     reproducible comparator rather than a tuned model.
 #   nwp_direct      : (in SECTION run, class NWPDirect near evaluate) the raw
 #                     HRRR NWP-CSI forecast itself, scored on the identical
 #                     masked cells. EXOGENOUS reference: the bar any model
@@ -65,6 +70,95 @@ class DayPersistence:
         last = np.where(lm, np.nan_to_num(last, nan=1.0), self._med[None, :])
         pred = np.tile(last, (1, self.n_days)).astype(np.float32)
         return np.repeat(pred[:, None, :], n_ensemble, axis=1)
+
+
+class BlendPersistence:
+    """Blend ordinary persistence with cyclic day-profile persistence.
+
+    The fit uses only the training windows of the current fold. The least-squares
+    variant follows Cyril Voyant's benchmark: the blend weight minimizes training
+    squared error and is clipped to [0, 1]. The correlation variant uses the
+    correlation-based weight as a separate reproducible reference.
+    """
+
+    def __init__(self, K, n_days, mode="least_squares"):
+        self.K = int(K)
+        self.n_days = int(n_days)
+        self.mode = str(mode)
+        self.weight = 0.5
+        self._med = None
+
+    def fit(self, hist_csi, fut_csi, hist_mask, fut_mask):
+        hist = np.asarray(hist_csi, np.float64)
+        hm = np.asarray(hist_mask, bool)
+        fut = np.asarray(fut_csi, np.float64)
+        fm = np.asarray(fut_mask, bool)
+
+        self._med = _col_median(fut, fm, self.K)
+        last = hist[:, -self.K:]
+        last_mask = hm[:, -self.K:]
+        cyclic = np.where(
+            last_mask,
+            np.nan_to_num(last, nan=1.0),
+            self._med[None, :],
+        )
+
+        # Ordinary persistence carries the last observed CSI value through
+        # the forecast. Cyclic persistence carries yesterday's profile.
+        last_value = np.where(
+            hm[:, -1] & np.isfinite(hist[:, -1]),
+            hist[:, -1],
+            np.nan,
+        )
+        fallback = np.nanmedian(self._med)
+        last_value = np.where(np.isfinite(last_value), last_value, fallback)
+        ordinary = np.repeat(last_value[:, None], self.K, axis=1)
+
+        target = fut[:, :self.K]
+        valid = fm[:, :self.K] & np.isfinite(target)
+        valid &= np.isfinite(cyclic) & np.isfinite(ordinary)
+        if not valid.any():
+            self.weight = 0.5
+            return self
+
+        p = ordinary[valid]
+        c = cyclic[valid]
+        y = target[valid]
+
+        if self.mode == "correlation":
+            if p.size < 2 or np.std(p) < 1e-12 or np.std(c) < 1e-12:
+                self.weight = 0.5
+            else:
+                rho = float(np.corrcoef(p, c)[0, 1])
+                self.weight = float(np.clip(0.5 * (1.0 + rho), 0.0, 1.0))
+        else:
+            d = p - c
+            den = float(np.dot(d, d))
+            self.weight = (
+                float(np.clip(np.dot(d, y - c) / den, 0.0, 1.0))
+                if den > 1e-12 else 0.5
+            )
+        return self
+
+    def predict_ensemble(self, hist_csi, hist_zen, fut_zen, hist_mask,
+                         fut_mask, fut_ghi_cs=None, fut_nwp=None,
+                         n_ensemble=1, rng=None):
+        hist = np.asarray(hist_csi, np.float64)
+        hm = np.asarray(hist_mask, bool)
+        last = hist[:, -self.K:]
+        lm = hm[:, -self.K:]
+        cyclic = np.where(lm, np.nan_to_num(last, nan=1.0), self._med[None, :])
+        last_value = np.where(
+            hm[:, -1] & np.isfinite(hist[:, -1]),
+            hist[:, -1],
+            np.nan,
+        )
+        fallback = np.nanmedian(self._med)
+        last_value = np.where(np.isfinite(last_value), last_value, fallback)
+        ordinary = np.repeat(last_value[:, None], self.K, axis=1)
+        day = self.weight * ordinary + (1.0 - self.weight) * cyclic
+        pred = np.tile(day, (1, self.n_days)).astype(np.float32)
+        return np.repeat(pred[:, None, :], int(n_ensemble), axis=1)
 
 
 class PeEn:

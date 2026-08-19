@@ -125,8 +125,6 @@ class MemberCalibrator:
 
     def fit(self, ens, truth, mask, b_grid=None, a_grid=None):
 
-
-
         ens = np.asarray(ens, np.float64)
         truth = np.asarray(truth, np.float64)
         mask = np.asarray(mask, bool)
@@ -203,8 +201,6 @@ class MemberCalibrator:
 
 def diebold_mariano(loss_a, loss_b, lag):
 
-
-
     d = np.asarray(loss_a, np.float64) - np.asarray(loss_b, np.float64)
     d = d[np.isfinite(d)]
     n = len(d)
@@ -254,7 +250,68 @@ def _variogram_score(ens, y, valid, p=0.5):
     return float(((yd - exd) ** 2).sum() / (dv * dv))
 
 
+def _mean_abs_daytotal(values, mask=None, K=None, n_days=None):
+    """Return the observed mean absolute daily total used for normalization.
+
+    When ``mask`` is supplied, ``values`` is interpreted as [N, H] and each
+    valid forecast day is summed before averaging. This is deliberately a
+    different scale from the pointwise mean irradiance scale.
+    """
+    if mask is not None:
+        values = np.asarray(values, np.float64)
+        mask = np.asarray(mask, bool)
+        if K is None or n_days is None:
+            raise ValueError("K and n_days are required for day totals")
+        totals = []
+        for b in range(int(n_days)):
+            sl = slice(b * int(K), (b + 1) * int(K))
+            v = mask[:, sl]
+            x = np.where(v & np.isfinite(values[:, sl]), values[:, sl], 0.0)
+            ok = v.any(axis=1)
+            totals.extend(np.sum(x, axis=1)[ok].tolist())
+    else:
+        totals = np.asarray(values, np.float64).ravel()
+    totals = np.asarray(totals, np.float64)
+    totals = totals[np.isfinite(totals)]
+    return float(np.mean(np.abs(totals))) if totals.size else np.nan
+
+
+def _nice_metrics(y_true, y_pred, persistence, mask):
+    """Persistence-relative NICE scores used by Cyril Voyant's benchmark."""
+    y_true = np.asarray(y_true, np.float64)
+    y_pred = np.asarray(y_pred, np.float64)
+    persistence = np.asarray(persistence, np.float64)
+    valid = np.asarray(mask, bool) & np.isfinite(y_true) \
+        & np.isfinite(y_pred) & np.isfinite(persistence)
+    if not valid.any():
+        return {"nice1": np.nan, "nice2": np.nan,
+                "nice3": np.nan, "nice_sigma": np.nan}
+    yt, yp, yr = y_true[valid], y_pred[valid], persistence[valid]
+    def lk(a, k):
+        return float(np.mean(np.abs(a) ** k) ** (1.0 / k))
+    d_ref = yt - yr
+    model_errors = [lk(yp - yt, k) for k in (1, 2, 3)]
+    ref_errors = [lk(d_ref, k) for k in (1, 2, 3)]
+    vals = [
+        (m / r) if r > 1e-12 else np.nan
+        for m, r in zip(model_errors, ref_errors)
+    ]
+    return {"nice1": vals[0], "nice2": vals[1], "nice3": vals[2],
+            "nice_sigma": float(np.nanmean(vals))}
+
+
+def persistence_reference(hist_csi, hist_mask, K, n_days):
+    """Construct the CSI day-persistence reference for NICE scoring."""
+    hist_csi = np.asarray(hist_csi, np.float64)
+    hist_mask = np.asarray(hist_mask, bool)
+    last = hist_csi[:, -int(K):]
+    valid = hist_mask[:, -int(K):] & np.isfinite(last)
+    last = np.where(valid, last, 1.0)
+    return np.tile(last, (1, int(n_days)))
+
+
 def _operator_metrics(pred_ens, truth, mask, K, n_days, ghi_cs=None):
+
 
     N, M, H = pred_ens.shape
     es, vs = [], []
@@ -278,8 +335,11 @@ def _operator_metrics(pred_ens, truth, mask, K, n_days, ghi_cs=None):
             if have_g:
                 gd = g[i, sl]
                 gv = np.where(v & np.isfinite(gd), gd, 0.0)
-                en_pred.append((ens_d * gv[None, :]).sum(1))
-                en_true.append((y_d * gv).sum())
+                # Ten-minute samples: convert W/m² to Wh/m² before scoring
+                # daily energy. The factor is 10/60 hours per sample.
+                dt_hours = 10.0 / 60.0
+                en_pred.append((ens_d * gv[None, :]).sum(1) * dt_hours)
+                en_true.append((y_d * gv).sum() * dt_hours)
             if v.sum() >= 2:
                 dif_e = np.abs(np.diff(ens_d, axis=1))          # [M,K-1]
                 cons = v[:-1] & v[1:]
@@ -326,9 +386,7 @@ def _operator_metrics(pred_ens, truth, mask, K, n_days, ghi_cs=None):
     if have_g:
         out["daytotal_energy_crps"] = _scalar_crps(en_pred, en_true)
         out["daytotal_energy_coverage_80"] = _scalar_cov(en_pred, en_true)
-        energy_values = np.asarray(en_true, np.float64)
-        energy_values = energy_values[np.isfinite(energy_values)]
-        energy_scale = float(np.mean(np.abs(energy_values))) if energy_values.size else np.nan
+        energy_scale = _mean_abs_daytotal(en_true)
         out["daytotal_energy_ncrps"] = (
             out["daytotal_energy_crps"] / energy_scale
             if np.isfinite(energy_scale) and energy_scale > 1e-12
@@ -337,7 +395,8 @@ def _operator_metrics(pred_ens, truth, mask, K, n_days, ghi_cs=None):
     return out
 
 
-def evaluate(pred_ens, truth, mask, cfg, K=None, n_days=None, ghi_cs=None):
+def evaluate(pred_ens, truth, mask, cfg, K=None, n_days=None, ghi_cs=None,
+             persistence_csi=None):
 
     mask = np.asarray(mask, bool)
     truth = np.asarray(truth, np.float64)
@@ -430,6 +489,16 @@ def evaluate(pred_ens, truth, mask, cfg, K=None, n_days=None, ghi_cs=None):
         out["calibration_err_ghi"] = (
             float(np.mean(np.abs(p_ghi - u_ghi))) if len(p_ghi) else np.nan
         )
+        if persistence_csi is not None:
+            nice = _nice_metrics(
+                truth_ghi, np.median(pred_ghi, axis=1),
+                np.asarray(persistence_csi, np.float64) * g,
+                valid_ghi,
+            )
+            out.update({f"{key}_ghi": value for key, value in nice.items()})
+        else:
+            out.update({"nice1_ghi": np.nan, "nice2_ghi": np.nan,
+                        "nice3_ghi": np.nan, "nice_sigma_ghi": np.nan})
         ghi_joint = _operator_metrics(
             pred_ghi, truth_ghi, valid_ghi, K, n_days, ghi_cs=None
         ) if K and n_days else {}
@@ -438,15 +507,20 @@ def evaluate(pred_ens, truth, mask, cfg, K=None, n_days=None, ghi_cs=None):
         out["daytotal_ghi_crps"] = ghi_joint.get("daytotal_crps", np.nan)
         out["daytotal_ghi_coverage_80"] = ghi_joint.get("daytotal_coverage_80", np.nan)
         out["ramp_crps_ghi"] = ghi_joint.get("ramp_crps", np.nan)
-        for source, target in [
-            ("energy_score_ghi", "nenergy_score_ghi"),
-            ("variogram_score_ghi", "nvariogram_score_ghi"),
-            ("ramp_crps_ghi", "nramp_crps_ghi"),
-            ("daytotal_ghi_crps", "ndaytotal_ghi_crps"),
+        daytotal_ghi_scale = _mean_abs_daytotal(
+            truth_ghi, valid_ghi, K, n_days
+        ) if K and n_days else np.nan
+        for source, target, scale in [
+            ("energy_score_ghi", "nenergy_score_ghi", ghi_scale),
+            ("variogram_score_ghi", "nvariogram_score_ghi", ghi_scale),
+            ("ramp_crps_ghi", "nramp_crps_ghi", ghi_scale),
+            # A daily-total score must be normalized by observed daily
+            # integrated GHI, not by the pointwise mean GHI.
+            ("daytotal_ghi_crps", "ndaytotal_ghi_crps", daytotal_ghi_scale),
         ]:
             out[target] = (
-                out[source] / ghi_scale
-                if np.isfinite(ghi_scale) and ghi_scale > 1e-12
+                out[source] / scale
+                if np.isfinite(scale) and scale > 1e-12
                 else np.nan
             )
 
@@ -485,6 +559,7 @@ def skill_score(m_model, m_ref):
 
 
 class DeepQuantile(FlowMatcher):
+
 
     def __init__(self, cfg, H_in, H_out, K, n_days, rep, device):
         super().__init__(cfg, H_in, H_out, K, n_days, prior=None, rep=rep,
