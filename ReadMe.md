@@ -61,6 +61,28 @@ python finetune_flowmatcher.py \
 
 Add `--dry-run` first to validate your data before committing to a full training run.
 
+## Fine-tune a FlowMatcher checkpoint with explicit NWP dropout.
+
+for example: 
+
+```bash
+python3 finetune_flowmatcher_nwp_dropout.py \
+    --checkpoint models/pooled_flow_gauss_nwp_fold0.pt \
+    --windows data/new_dataset_windows.npz \
+    --output models/pooled_flow_gauss_nwp_dropout10_fold0.pt \
+    --epochs 10 \
+    --lr 2e-5 \
+    --nwp-dropout 0.10 \
+    --verbose 1 \
+    --device cuda
+```
+
+## Dedicated geometry-only model: pure generator of data
+Fine-tuning an existing checkpoint can work as an experiment, but it does not completely change what the model learned. The original checkpoint learned to rely on history and NWP, so a short fine-tuning run may retain those dependencies. For a serious geometry-only model, I would prefer retraining from scratch with the geometry-only objective, or at least fine-tuning for enough epochs with:
+- history_dropout = 1.0
+- nwp_dropout     = 1.0
+and a non-history prior such as clearsky, climatology, or white.
+
 ## Citation
 
 The associated manuscript is in preparation.

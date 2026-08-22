@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-
 # Final warm-start fine-tuning utility for the solar FlowMatcher.
-
-# This script fine-tunes an existing checkpoint on a new,
-# compatible window file. The checkpoint remains authoritative for the model
-# architecture, fitted representation, prior, NWP channel order, clear-sky
-# normalization, and site-conditioning width. Only optimization settings are
-# changed.
-
 
 # Required window arrays
 # ----------------------
@@ -63,7 +55,9 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 import numpy as np
 
+# The final application and diagnostic plotting code use this standalone core.
 import core
+
 
 REQUIRED_ARRAYS = {
     "hist_csi",
@@ -83,9 +77,11 @@ ROW_LEVEL_METADATA = {
     "last_day_ord",
     "date_ord",
     "site_id",
-    "site_names",
     "site_coords",
 }
+
+# Station-level metadata: one name per station, not one name per window.
+STATION_LEVEL_METADATA = {"site_names"}
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +176,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 
 def seed_everything(seed: int) -> None:
-    # Seed Python, NumPy, and Torch when Torch is installed
+    """Seed Python, NumPy, and Torch when Torch is installed."""
     random.seed(int(seed))
     np.random.seed(int(seed))
     try:
@@ -197,7 +193,7 @@ def seed_everything(seed: int) -> None:
 # Configuration and window loading
 # ---------------------------------------------------------------------------
 def load_yaml_config(path: Optional[str]) -> Dict[str, Any]:
-    # Return canonical defaults merged with a YAML preprocessing config
+    """Return canonical defaults merged with a YAML preprocessing config."""
     cfg = core.json_roundtrip(core.DEFAULT_CONFIG)
     if not path:
         return cfg
@@ -219,7 +215,7 @@ def load_yaml_config(path: Optional[str]) -> Dict[str, Any]:
 
 
 def load_windows(path: str) -> Dict[str, np.ndarray]:
-    # Load an NPZ window file without pickle support
+    """Load an NPZ window file without pickle support."""
     window_path = Path(path)
     if not window_path.is_file():
         raise FileNotFoundError(f"window file does not exist: {window_path}")
@@ -237,7 +233,7 @@ def _require_numeric(name: str, value: np.ndarray) -> None:
 
 
 def _validate_row_alignment(windows: Mapping[str, np.ndarray], n: int) -> None:
-    # Reject row-level arrays that cannot be indexed with the windows
+    """Reject row-level arrays that cannot be indexed with the windows."""
     for name, value in windows.items():
         arr = np.asarray(value)
         if name == "K" or arr.ndim == 0:
@@ -251,7 +247,7 @@ def _validate_row_alignment(windows: Mapping[str, np.ndarray], n: int) -> None:
 
 
 def validate_windows(fm: Any, windows: Mapping[str, np.ndarray], max_rows: int = 0) -> None:
-    # Validate geometry, masks, metadata, finite values, and site shape
+    """Validate geometry, masks, metadata, finite values, and site shape."""
     missing = sorted(REQUIRED_ARRAYS - set(windows))
     if missing:
         raise ValueError(f"window file is missing required arrays: {missing}")
@@ -345,7 +341,7 @@ def validate_windows(fm: Any, windows: Mapping[str, np.ndarray], max_rows: int =
 
 
 def select_rows(windows: Dict[str, np.ndarray], max_rows: int) -> Dict[str, np.ndarray]:
-    # Select earliest chronological rows while preserving scalar arrays
+    """Select earliest chronological rows while preserving scalar arrays."""
     if not max_rows:
         return windows
     date_ord = np.asarray(windows["date_ord"])
@@ -362,7 +358,7 @@ def select_rows(windows: Dict[str, np.ndarray], max_rows: int) -> Dict[str, np.n
 # Conditioning contracts and training
 # ---------------------------------------------------------------------------
 def future_nwp(windows: Mapping[str, np.ndarray]) -> Optional[Dict[str, np.ndarray]]:
-    # Return future NWP arrays in the format consumed by FlowMatcher.fit()
+    """Return future NWP arrays in the format consumed by FlowMatcher.fit()."""
     excluded = {"fut_csi", "fut_zen", "fut_mask", "fut_ghi_cs"}
     result = {
         key: np.asarray(value)
@@ -373,7 +369,7 @@ def future_nwp(windows: Mapping[str, np.ndarray]) -> Optional[Dict[str, np.ndarr
 
 
 def validate_nwp_contract(fm: Any, windows: Mapping[str, np.ndarray]) -> None:
-    # Ensure the new dataset has exactly the checkpoint NWP channel contract
+    """Ensure the new dataset has exactly the checkpoint NWP channel contract."""
     actual = fm._resolve_nwp_spec(future_nwp(windows) or {})
     expected = list(fm.nwp_spec)
     if actual != expected:
@@ -391,7 +387,7 @@ def fit_arrays(
     val_idx: np.ndarray,
     seed: int,
 ) -> Any:
-    # Fine-tune FlowMatcher using the project training implementation
+    """Fine-tune FlowMatcher using the project training implementation."""
     fit_idx = np.concatenate(
         [np.asarray(train_idx, dtype=np.int64), np.asarray(val_idx, dtype=np.int64)]
     )
@@ -434,7 +430,7 @@ def write_metadata(
     train_idx: np.ndarray,
     val_idx: np.ndarray,
 ) -> Path:
-    # Write a reproducibility sidecar beside the checkpoint
+    """Write a reproducibility sidecar beside the checkpoint."""
     metadata = {
         "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "source_checkpoint": str(Path(args.checkpoint).resolve()),
@@ -470,7 +466,7 @@ def write_metadata(
 
 
 def save_checkpoint_atomic(fm: Any, output_path: Path) -> None:
-    # Save through a temporary file so an interrupted run cannot corrupt output
+    """Save through a temporary file so an interrupted run cannot corrupt output."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_name(output_path.name + ".tmp")
     try:
@@ -484,7 +480,7 @@ def save_checkpoint_atomic(fm: Any, output_path: Path) -> None:
 
 
 def cleanup_resources() -> None:
-    # Release Python and CUDA allocations after success or failure
+    """Release Python and CUDA allocations after success or failure."""
     gc.collect()
     try:
         import torch

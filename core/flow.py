@@ -47,7 +47,6 @@ def _lazy_torch():
 
 class _EMAWeights:
 
-
     def __init__(self, net, decay):
         torch, _ = _lazy_torch()
         self.decay = float(decay)
@@ -108,6 +107,9 @@ class _NetBuilder:
 
     @staticmethod
     def build(cfg, H_in, H_out, n_fut_extra, n_out=1):
+
+
+
         torch, nn = _lazy_torch()
         m = cfg["model"]
         hidden = int(m["hidden"])
@@ -143,6 +145,10 @@ class _NetBuilder:
 
         class Block(nn.Module):
 
+
+
+
+
             def __init__(self, ch, cond, d):
                 super().__init__()
                 pad = d * (ks - 1) // 2
@@ -160,6 +166,9 @@ class _NetBuilder:
                 return torch.relu(x + y)
 
         class AttnBridge(nn.Module):
+
+
+
 
             def __init__(self, ch):
                 super().__init__()
@@ -315,6 +324,7 @@ class FlowMatcher:
 
     def _fut_extras(self, fut_zen, fut_mask, fut_ghi_cs, fut_nwp=None,
                     site_coords=None):
+
         N = fut_zen.shape[0]
         ch = [self._cos_zen(fut_zen),
               fut_mask.astype(np.float32),
@@ -501,6 +511,11 @@ class FlowMatcher:
                           "anchoring on clear sky instead", RuntimeWarning)
 
         N = x1.shape[0]
+        nwp_start = 3 + int(self.gcs_scale is not None)
+        nwp_end = nwp_start + len(self.nwp_spec)
+        p_nd = float(t_cfg.get("nwp_dropout", 0.0) or 0.0)
+        if p_nd and not self.nwp_spec:
+            raise ValueError("nwp_dropout > 0 requires NWP conditioning channels")
         if es_split is not None and t_cfg.get("early_stopping", True):
             tr_idx, va_idx = (np.asarray(es_split[0]), np.asarray(es_split[1]))
             do_es = len(va_idx) > 0
@@ -552,11 +567,15 @@ class FlowMatcher:
                 b = perm[s0:s0 + bs]
                 hmb = hm[b]
                 hcb = hcf_np[b]
+                drop_nwp = (rng.random(len(b)) < p_nd) if p_nd else np.zeros(len(b), bool)
+                anchor_b = None if nwp_anchor is None else np.asarray(nwp_anchor[b]).copy()
+                if anchor_b is not None and drop_nwp.any() \
+                        and getattr(self.prior, "needs_nwp", False):
+                    anchor_b[drop_nwp, :] = float(self.rep.clearsky_code())
                 x0 = self.prior.sample(len(b), rng, hist_rep=hcb,
                                        hist_mask=hmb, fut_mask=fm[b],
                                        hist_csi_phys=hist_csi[b],
-                                       fut_nwp_anchor=(None if nwp_anchor is None
-                                                       else nwp_anchor[b]))
+                                       fut_nwp_anchor=anchor_b)
                 tt = rng.random(len(b)).astype(np.float32)
                 x0_t = self._to_t(x0)
                 tt_t = self._to_t(tt)
@@ -576,6 +595,11 @@ class FlowMatcher:
                     fx_t = self._to_t(fut_ex[b])
                     fb_t = self._to_b(fm[b])
                     fm_t = self._to_t(fm[b].astype(np.float32))
+                if drop_nwp.any():
+                    if on_device:
+                        fx_t = fx_t.clone()
+                    drop_t = self._to_b(drop_nwp)
+                    fx_t[drop_t, nwp_start:nwp_end, :] = 0.0
 
                 # history (conditioning) dropout: blank the history of a random
                 # subset of rows so the model learns to forecast from NWP +
@@ -687,6 +711,9 @@ class FlowMatcher:
                          fut_ghi_cs=None, fut_nwp=None, n_ensemble=50, rng=None,
                          raw=False, site_coords=None):
 
+
+
+
         rng = rng or np.random.default_rng(0)
         hc = self.rep.encode(hist_csi)
         hz = self._cos_zen(hist_zen)
@@ -706,6 +733,8 @@ class FlowMatcher:
         return ens
 
     def fit_calibrator(self, W, va_idx, rng=None):
+
+
 
         if not bool(self.cfg["train"].get("calibrate", False)):
             return self
@@ -732,6 +761,8 @@ class FlowMatcher:
 
     # ---- persistence ---------------------------------------------------------
     def save(self, path):
+
+
 
         torch, _ = _lazy_torch()
         ckpt = {
