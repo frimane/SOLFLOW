@@ -81,6 +81,7 @@ python3 finetune_flowmatcher_nwp_dropout.py \
 Fine-tuning an existing checkpoint can work as an experiment, but it does not completely change what the model learned. The original checkpoint learned to rely on history and NWP, so a short fine-tuning run may retain those dependencies. For a serious geometry-only model, I would prefer retraining from scratch with the geometry-only objective, or at least fine-tuning for enough epochs with:
 - history_dropout = 1.0
 - nwp_dropout     = 1.0
+
 and a non-history prior such as clearsky, climatology, or white.
 
 ## Citation
